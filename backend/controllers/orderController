@@ -1,0 +1,726 @@
+const { sql } = require("../config/database");
+
+// ==========================================
+// HELPER: CHECK USER ROLE
+// ==========================================
+
+const getUserRole = (req) => {
+    return String(req.user?.role || "").toLowerCase();
+};
+
+
+// ==========================================
+// GET ALL ORDERS - ROLE BASED ACCESS
+// ==========================================
+
+const getAllOrders = async (req, res) => {
+
+    try {
+
+        if (!req.user || !req.user.user_id) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized. Please login."
+            });
+        }
+
+        const userRole = getUserRole(req);
+
+        let result;
+
+        // ADMIN: VIEW ALL ORDERS
+        if (userRole === "admin") {
+
+            result = await sql.query`
+
+                SELECT
+                    o.order_id,
+                    o.customer_id,
+                    c.company_name AS customer_name,
+                    o.order_date,
+                    o.total_amount,
+                    o.status
+
+                FROM Orders o
+
+                INNER JOIN Customers c
+                    ON o.customer_id = c.customer_id
+
+                ORDER BY o.order_id DESC
+
+            `;
+
+        }
+
+        // CUSTOMER: VIEW OWN ORDERS ONLY
+        else if (userRole === "customer") {
+
+            result = await sql.query`
+
+                SELECT
+                    o.order_id,
+                    o.customer_id,
+                    c.company_name AS customer_name,
+                    o.order_date,
+                    o.total_amount,
+                    o.status
+
+                FROM Orders o
+
+                INNER JOIN Customers c
+                    ON o.customer_id = c.customer_id
+
+                WHERE c.user_id = ${req.user.user_id}
+
+                ORDER BY o.order_id DESC
+
+            `;
+
+        }
+
+        else {
+
+            return res.status(403).json({
+                success: false,
+                message: "Access denied."
+            });
+
+        }
+
+        return res.status(200).json({
+
+            success: true,
+            count: result.recordset.length,
+            orders: result.recordset
+
+        });
+
+    } catch (error) {
+
+        console.error("Get Orders Error:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch orders"
+        });
+
+    }
+
+};
+
+
+// ==========================================
+// CREATE NEW ORDER
+// ADMIN + CUSTOMER
+// ==========================================
+
+const createOrder = async (req, res) => {
+
+    const transaction = new sql.Transaction();
+
+    let transactionStarted = false;
+
+    try {
+
+        // CHECK AUTHENTICATION
+        if (!req.user || !req.user.user_id) {
+            return res.status(401).json({
+                success: false,
+                message: "Please login first."
+            });
+        }
+
+        const userRole = getUserRole(req);
+
+        if (!["admin", "customer"].includes(userRole)) {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied."
+            });
+        }
+
+        const {
+            company_name,
+            phone,
+            address,
+            items
+        } = req.body;
+
+        // VALIDATE ITEMS
+        if (!Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Order items are required."
+            });
+        }
+
+        // VALIDATE PRODUCT IDs AND QUANTITIES
+        for (const item of items) {
+
+            if (
+                !Number.isInteger(Number(item.product_id)) ||
+                !Number.isInteger(Number(item.quantity)) ||
+                Number(item.product_id) <= 0 ||
+                Number(item.quantity) <= 0
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid product ID or quantity."
+                });
+
+            }
+
+        }
+
+        await transaction.begin();
+
+        transactionStarted = true;
+
+        let customerId;
+
+        // ==================================
+        // CUSTOMER ACCOUNT LINKING
+        // ==================================
+
+        if (userRole === "customer") {
+
+            // FIND EXISTING CUSTOMER PROFILE
+            const existingCustomer = await new sql.Request(transaction)
+                .input("user_id", sql.Int, req.user.user_id)
+                .query(`
+                    SELECT customer_id
+                    FROM Customers
+                    WHERE user_id = @user_id
+                `);
+
+            if (existingCustomer.recordset.length > 0) {
+
+                customerId =
+                    existingCustomer.recordset[0].customer_id;
+
+            } else {
+
+                // CREATE PROFILE FOR FIRST-TIME CUSTOMER
+
+                if (!company_name || !company_name.trim()) {
+                    throw new Error(
+                        "Company name is required for your first order."
+                    );
+                }
+
+                const customerResult = await new sql.Request(transaction)
+                    .input("company_name", sql.VarChar(150), company_name.trim())
+                    .input("phone", sql.VarChar(30), phone || null)
+                    .input("address", sql.VarChar(255), address || null)
+                    .input("user_id", sql.Int, req.user.user_id)
+                    .query(`
+                        INSERT INTO Customers
+                        (
+                            company_name,
+                            phone,
+                            address,
+                            user_id
+                        )
+                        OUTPUT INSERTED.customer_id
+                        VALUES
+                        (
+                            @company_name,
+                            @phone,
+                            @address,
+                            @user_id
+                        )
+                    `);
+
+                customerId =
+                    customerResult.recordset[0].customer_id;
+
+            }
+
+        }
+
+        // ==================================
+        // ADMIN: CREATE CUSTOMER RECORD
+        // ==================================
+
+        else {
+
+            if (!company_name || !company_name.trim()) {
+                throw new Error("Customer company name is required.");
+            }
+
+            const customerResult = await new sql.Request(transaction)
+                .input("company_name", sql.VarChar(150), company_name.trim())
+                .input("phone", sql.VarChar(30), phone || null)
+                .input("address", sql.VarChar(255), address || null)
+                .query(`
+                    INSERT INTO Customers
+                    (
+                        company_name,
+                        phone,
+                        address
+                    )
+                    OUTPUT INSERTED.customer_id
+                    VALUES
+                    (
+                        @company_name,
+                        @phone,
+                        @address
+                    )
+                `);
+
+            customerId =
+                customerResult.recordset[0].customer_id;
+
+        }
+
+        // ==================================
+        // CALCULATE TOTAL AND CHECK STOCK
+        // ==================================
+
+        let totalAmount = 0;
+
+        const orderItems = [];
+
+        for (const item of items) {
+
+            const productResult = await new sql.Request(transaction)
+                .input("product_id", sql.Int, Number(item.product_id))
+                .query(`
+                    SELECT
+                        product_id,
+                        product_name,
+                        price,
+                        stock_quantity
+                    FROM Products WITH (UPDLOCK, ROWLOCK)
+                    WHERE product_id = @product_id
+                `);
+
+            if (productResult.recordset.length === 0) {
+                throw new Error(
+                    `Product ${item.product_id} not found.`
+                );
+            }
+
+            const product = productResult.recordset[0];
+
+            const quantity = Number(item.quantity);
+
+            if (Number(product.stock_quantity) < quantity) {
+                throw new Error(
+                    `Insufficient stock for ${product.product_name}.`
+                );
+            }
+
+            const unitPrice = Number(product.price);
+
+            const subtotal = unitPrice * quantity;
+
+            totalAmount += subtotal;
+
+            orderItems.push({
+
+                product_id: product.product_id,
+                quantity,
+                unit_price: unitPrice,
+                subtotal
+
+            });
+
+            // REDUCE STOCK
+            await new sql.Request(transaction)
+                .input("product_id", sql.Int, product.product_id)
+                .input("quantity", sql.Int, quantity)
+                .query(`
+                    UPDATE Products
+                    SET stock_quantity = stock_quantity - @quantity
+                    WHERE product_id = @product_id
+                `);
+
+        }
+
+        // ==================================
+        // CREATE ORDER
+        // ==================================
+
+        const orderResult = await new sql.Request(transaction)
+
+            .input("customer_id", sql.Int, customerId)
+            .input("total_amount", sql.Decimal(12, 2), totalAmount)
+            .input("status", sql.VarChar(50), "Pending")
+
+            .query(`
+                INSERT INTO Orders
+                (
+                    customer_id,
+                    order_date,
+                    total_amount,
+                    status
+                )
+                OUTPUT INSERTED.order_id
+                VALUES
+                (
+                    @customer_id,
+                    GETDATE(),
+                    @total_amount,
+                    @status
+                )
+            `);
+
+        const orderId = orderResult.recordset[0].order_id;
+
+
+        // ==================================
+        // INSERT ORDER ITEMS
+        // ==================================
+
+        for (const item of orderItems) {
+
+            await new sql.Request(transaction)
+
+                .input("order_id", sql.Int, orderId)
+                .input("product_id", sql.Int, item.product_id)
+                .input("quantity", sql.Int, item.quantity)
+                .input("unit_price", sql.Decimal(12, 2), item.unit_price)
+                .input("subtotal", sql.Decimal(12, 2), item.subtotal)
+
+                .query(`
+                    INSERT INTO OrderItems
+                    (
+                        order_id,
+                        product_id,
+                        quantity,
+                        unit_price,
+                        subtotal
+                    )
+                    VALUES
+                    (
+                        @order_id,
+                        @product_id,
+                        @quantity,
+                        @unit_price,
+                        @subtotal
+                    )
+                `);
+
+        }
+
+
+        // ==================================
+        // AUTOMATIC INVOICE CREATION
+        // ==================================
+
+        const invoiceResult = await new sql.Request(transaction)
+
+            .input("order_id", sql.Int, orderId)
+            .input("total_amount", sql.Decimal(12, 2), totalAmount)
+
+            .query(`
+                INSERT INTO Invoices
+                (
+                    order_id,
+                    invoice_date,
+                    total_amount
+                )
+                OUTPUT INSERTED.invoice_id
+                VALUES
+                (
+                    @order_id,
+                    GETDATE(),
+                    @total_amount
+                )
+            `);
+
+        const invoiceId = invoiceResult.recordset[0].invoice_id;
+
+
+        // ==================================
+        // COMMIT TRANSACTION
+        // ==================================
+
+        await transaction.commit();
+
+        transactionStarted = false;
+
+        return res.status(201).json({
+
+            success: true,
+
+            message: "Order and invoice created successfully",
+
+            order_id: orderId,
+
+            invoice_id: invoiceId,
+
+            customer_id: customerId,
+
+            total_amount: totalAmount,
+
+            status: "Pending"
+
+        });
+
+    } catch (error) {
+
+        if (transactionStarted) {
+
+            try {
+                await transaction.rollback();
+            } catch (rollbackError) {
+                console.error("Rollback Error:", rollbackError);
+            }
+
+        }
+
+        console.error("Create Order Error:", error);
+
+        return res.status(500).json({
+
+            success: false,
+
+            message: error.message || "Failed to create order"
+
+        });
+
+    }
+
+};
+
+
+// ==========================================
+// UPDATE ORDER STATUS - ADMIN ONLY
+// ==========================================
+
+const updateOrderStatus = async (req, res) => {
+
+    try {
+
+        if (!req.user || !req.user.user_id) {
+            return res.status(401).json({
+                success: false,
+                message: "Please login first."
+            });
+        }
+
+        const userRole = getUserRole(req);
+
+        // ONLY ADMIN CAN UPDATE STATUS
+        if (userRole !== "admin") {
+
+            return res.status(403).json({
+                success: false,
+                message: "Only administrators can update order status."
+            });
+
+        }
+
+        const orderId = Number(req.params.id);
+
+        const { status } = req.body;
+
+        if (!Number.isInteger(orderId) || orderId <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid order ID."
+            });
+        }
+
+        const allowedStatuses = [
+            "Pending",
+            "Processing",
+            "Delivered",
+            "Cancelled"
+        ];
+
+        if (!allowedStatuses.includes(status)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid order status."
+            });
+        }
+
+        const result = await sql.query`
+
+            UPDATE Orders
+
+            SET status = ${status}
+
+            OUTPUT INSERTED.*
+
+            WHERE order_id = ${orderId}
+
+        `;
+
+        if (result.recordset.length === 0) {
+
+            return res.status(404).json({
+                success: false,
+                message: "Order not found."
+            });
+
+        }
+
+        return res.status(200).json({
+
+            success: true,
+
+            message: "Order status updated successfully",
+
+            order: result.recordset[0]
+
+        });
+
+    } catch (error) {
+
+        console.error("Update Order Status Error:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update order status."
+        });
+
+    }
+
+};
+
+
+// ==========================================
+// GET ORDER ITEMS - ROLE BASED ACCESS
+// ==========================================
+
+const getOrderItems = async (req, res) => {
+
+    try {
+
+        if (!req.user || !req.user.user_id) {
+            return res.status(401).json({
+                success: false,
+                message: "Please login first."
+            });
+        }
+
+        const orderId = Number(req.params.id);
+
+        if (!Number.isInteger(orderId) || orderId <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid order ID."
+            });
+        }
+
+        const userRole = getUserRole(req);
+
+        let orderCheck;
+
+        // ADMIN: ACCESS ALL ORDERS
+        if (userRole === "admin") {
+
+            orderCheck = await sql.query`
+
+                SELECT order_id
+                FROM Orders
+                WHERE order_id = ${orderId}
+
+            `;
+
+        }
+
+        // CUSTOMER: ACCESS OWN ORDERS ONLY
+        else if (userRole === "customer") {
+
+            orderCheck = await sql.query`
+
+                SELECT o.order_id
+
+                FROM Orders o
+
+                INNER JOIN Customers c
+                    ON o.customer_id = c.customer_id
+
+                WHERE o.order_id = ${orderId}
+
+                AND c.user_id = ${req.user.user_id}
+
+            `;
+
+        }
+
+        else {
+
+            return res.status(403).json({
+                success: false,
+                message: "Access denied."
+            });
+
+        }
+
+        if (orderCheck.recordset.length === 0) {
+
+            return res.status(404).json({
+                success: false,
+                message: "Order not found or access denied."
+            });
+
+        }
+
+        // FETCH ORDER ITEMS
+        const result = await sql.query`
+
+            SELECT
+                oi.order_item_id,
+                oi.order_id,
+                oi.product_id,
+                p.product_name,
+                oi.quantity,
+                oi.unit_price,
+                oi.subtotal
+
+            FROM OrderItems oi
+
+            INNER JOIN Products p
+                ON oi.product_id = p.product_id
+
+            WHERE oi.order_id = ${orderId}
+
+        `;
+
+        return res.status(200).json({
+
+            success: true,
+
+            items: result.recordset
+
+        });
+
+    } catch (error) {
+
+        console.error("Get Order Items Error:", error);
+
+        return res.status(500).json({
+
+            success: false,
+
+            message: "Failed to fetch order items."
+
+        });
+
+    }
+
+};
+
+
+// ==========================================
+// EXPORT FUNCTIONS
+// ==========================================
+
+module.exports = {
+
+    getAllOrders,
+
+    createOrder,
+
+    updateOrderStatus,
+
+    getOrderItems
+
+};

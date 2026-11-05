@@ -1,0 +1,90 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+/* ORDERFLOW — GLOBAL FIERY PEACOCK THEME */
+
+:root {
+  font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+  color: #123B4A;
+  color-scheme: light;
+
+  --of-peacock: #123B4A;
+  --of-peacock-deep: #0A2633;
+  --of-pistachio: #B7C99A;
+  --of-ivory: #F4F0E6;
+  --of-neon: #D0F030;
+
+  --primary: #123B4A;
+  --primary-dark: #0A2633;
+  --text: #123B4A;
+  --muted: #71827D;
+  --border: #E4E7D9;
+  --background: #F4F0E6;
+  --white: #FFFEFA;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: #F4F0E6;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  color: #123B4A;
+  background: #F4F0E6;
+  font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+}
+
+#root {
+  min-height: 100vh;
+  background: #F4F0E6;
+  isolation: isolate;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: #123B4A;
+}
+
+::selection {
+  color: #0A2633;
+  background: #D0F030;
+}
+
+:focus-visible {
+  outline: 2px solid #D0F030;
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
